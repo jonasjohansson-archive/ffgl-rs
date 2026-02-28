@@ -15,6 +15,7 @@ ffgl-glium = { path = "../ffgl-glium" }
 ffgl-core = { path = "../ffgl-core" }
 
 isf = "0.1.0"
+image = { version = "0.24", default-features = false, features = ["png", "jpeg", "tiff", "bmp"] }
 genmesh = "0.6.2"
 thiserror = "1.0.50"
 serde = { version = "1.0", features = ["derive"] }

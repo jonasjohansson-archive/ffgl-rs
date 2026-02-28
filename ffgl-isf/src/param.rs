@@ -12,6 +12,7 @@ use isf;
 use tracing::warn;
 
 use std::ffi::CString;
+use std::os::raw::c_char;
 
 ///Holds the value and the metadata about the value
 #[derive(Debug, Clone)]
@@ -71,6 +72,58 @@ impl IsfInputValue {
             Self::None => 0.0,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct FileImageParam {
+    pub name: String,
+    pub info: SimpleParamInfo,
+    pub path: String,
+    pub path_cstring: CString,
+    pub needs_reload: bool,
+}
+
+impl FileImageParam {
+    pub fn new(name: &str) -> Self {
+        let display = display_name_from_camel(name);
+        let info = SimpleParamInfo {
+            name: CString::new(display.clone()).expect("Failed to create CString"),
+            param_type: ParameterTypes::File,
+            display_name: Some(display),
+            file_extensions: Some(
+                ["png", "jpg", "jpeg", "tiff", "bmp"]
+                    .iter()
+                    .map(|e| CString::new(*e).unwrap())
+                    .collect(),
+            ),
+            ..Default::default()
+        };
+
+        Self {
+            name: name.to_string(),
+            info,
+            path: String::new(),
+            path_cstring: CString::new("").unwrap(),
+            needs_reload: false,
+        }
+    }
+}
+
+/// Convert camelCase parameter names to readable display names.
+/// "maskPos" -> "Mask Pos", "fadeWidth" -> "Fade Width", "amount" -> "Amount"
+fn display_name_from_camel(name: &str) -> String {
+    let mut result = String::new();
+    for (i, ch) in name.chars().enumerate() {
+        if ch.is_uppercase() && i > 0 {
+            result.push(' ');
+        }
+        if i == 0 {
+            result.extend(ch.to_uppercase());
+        } else {
+            result.push(ch);
+        }
+    }
+    result
 }
 
 fn param_info_for_isf_input(isf::Input { name, ty }: &isf::Input) -> Vec<SimpleParamInfo> {
@@ -142,18 +195,21 @@ fn param_info_for_isf_input(isf::Input { name, ty }: &isf::Input) -> Vec<SimpleP
 
         InputType::Image => vec![],
         _ => {
-            let name = CString::new(name.clone()).expect("Failed to create CString");
+            let disp = display_name_from_camel(name);
+            let name = CString::new(disp.clone()).expect("Failed to create CString");
 
             vec![match ty {
                 InputType::Event => SimpleParamInfo {
                     param_type: ParameterTypes::Event,
                     default: Some(false as u32 as f32),
+                    display_name: Some(disp),
                     name,
                     ..Default::default()
                 },
                 InputType::Bool(x) => SimpleParamInfo {
                     param_type: ParameterTypes::Boolean,
                     default: Some(x.default.unwrap_or_default() as u32 as f32),
+                    display_name: Some(disp),
                     name,
                     ..Default::default()
                 },
@@ -162,6 +218,7 @@ fn param_info_for_isf_input(isf::Input { name, ty }: &isf::Input) -> Vec<SimpleP
                     default: x.default.or(x.identity),
                     min: x.min.or(x.identity),
                     max: x.max.or(x.identity),
+                    display_name: Some(disp),
                     name,
                     ..Default::default()
                 },
@@ -195,6 +252,7 @@ fn param_info_for_isf_input(isf::Input { name, ty }: &isf::Input) -> Vec<SimpleP
                             })
                             .collect(),
                     ),
+                    display_name: Some(disp),
                     name,
                     ..Default::default()
                 },
@@ -212,6 +270,7 @@ fn param_info_for_isf_input(isf::Input { name, ty }: &isf::Input) -> Vec<SimpleP
 pub enum IsfFFGLParam {
     Isf(IsfShaderParam),
     Overlay(OverlayParams, f32),
+    FileImage(FileImageParam),
 }
 
 impl ParamInfoHandler for IsfFFGLParam {
@@ -219,6 +278,7 @@ impl ParamInfoHandler for IsfFFGLParam {
         match self {
             Self::Isf(x) => &x.params[index],
             Self::Overlay(x, _) => x,
+            Self::FileImage(x) => &x.info,
         }
     }
 
@@ -226,6 +286,7 @@ impl ParamInfoHandler for IsfFFGLParam {
         match self {
             Self::Isf(x) => x.params.len(),
             Self::Overlay(_, _) => 1,
+            Self::FileImage(_) => 1,
         }
     }
 }
@@ -235,6 +296,7 @@ impl ParamValueHandler for IsfFFGLParam {
         match self {
             Self::Isf(x) => x.value.set(index, value),
             Self::Overlay(_, x) => *x = value,
+            Self::FileImage(_) => {} // no-op for file params
         }
     }
 
@@ -242,6 +304,7 @@ impl ParamValueHandler for IsfFFGLParam {
         match self {
             Self::Isf(x) => x.value.get(index),
             Self::Overlay(_, x) => *x,
+            Self::FileImage(_) => 0.0, // no-op for file params
         }
     }
 }
@@ -294,5 +357,44 @@ impl IsfShaderParam {
             ty,
             params,
         }
+    }
+}
+
+// Text param methods for the param collection (used by handler/instance)
+pub trait TextParamHandler {
+    fn set_text_param(&mut self, index: usize, value: &str);
+    fn get_text_param(&self, index: usize) -> *const c_char;
+}
+
+impl TextParamHandler for [IsfFFGLParam] {
+    fn set_text_param(&mut self, index: usize, value: &str) {
+        let mut idx = index;
+        for p in self.iter_mut() {
+            let n = p.num_params();
+            if idx < n {
+                if let IsfFFGLParam::FileImage(ref mut fp) = p {
+                    fp.path = value.to_string();
+                    fp.path_cstring = CString::new(value).unwrap_or_default();
+                    fp.needs_reload = true;
+                }
+                return;
+            }
+            idx -= n;
+        }
+    }
+
+    fn get_text_param(&self, index: usize) -> *const c_char {
+        let mut idx = index;
+        for p in self.iter() {
+            let n = p.num_params();
+            if idx < n {
+                if let IsfFFGLParam::FileImage(ref fp) = p {
+                    return fp.path_cstring.as_ptr();
+                }
+                return std::ptr::null();
+            }
+            idx -= n;
+        }
+        std::ptr::null()
     }
 }

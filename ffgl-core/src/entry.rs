@@ -13,6 +13,8 @@ use crate::parameters::ParamInfo;
 
 use std::sync::OnceLock;
 use std::{any::Any, ffi::CString};
+use std::ffi::CStr;
+use std::os::raw::c_char;
 
 use crate::conversions::*;
 
@@ -131,7 +133,14 @@ pub fn default_ffgl_entry<H: FFGLHandler + 'static>(
             num: handler.num_params() as u32,
         },
 
-        Op::GetParameterDefault => param(handler, input_value).default_val().into(),
+        Op::GetParameterDefault => {
+            let p = param(handler, input_value);
+            if p.param_type().is_string_type() {
+                FFGLVal::from(p.default_string_val().as_ptr())
+            } else {
+                p.default_val().into()
+            }
+        }
         Op::GetParameterGroup => {
             let input: &GetStringStruct = unsafe { input_value.as_ref() };
             let buffer = input.stringBuffer;
@@ -172,27 +181,51 @@ pub fn default_ffgl_entry<H: FFGLHandler + 'static>(
         Op::GetParameterName => param(handler, input_value).name().into(),
         Op::GetParameterType => param(handler, input_value).param_type().into(),
 
-        Op::GetParameter => instance
-            .context(e!("No instance"))?
-            .renderer
-            .get_param(unsafe { input_value.num } as usize)
-            .into(),
+        Op::GetParameter => {
+            let index = unsafe { input_value.num } as usize;
+            let p = handler.param_info(index);
+            if p.param_type().is_string_type() {
+                let ptr = instance
+                    .context(e!("No instance"))?
+                    .renderer
+                    .get_text_param(index);
+                FFGLVal::from(ptr)
+            } else {
+                instance
+                    .context(e!("No instance"))?
+                    .renderer
+                    .get_param(index)
+                    .into()
+            }
+        }
 
         Op::SetParameter => {
             let input: &SetParameterStruct = unsafe { input_value.as_ref() };
             let index = input.ParameterNumber;
-
-            // let param = param_mut(instance, index as usize);
             let index_usize = index as usize;
 
-            //dunno why they store this in a u32, whatever..
-            let new_value =
-                unsafe { std::mem::transmute::<u32, f32>(input.NewParameterValue.UIntValue) };
-
-            instance
-                .context(e!("No instance"))?
-                .renderer
-                .set_param(index_usize, new_value);
+            let p = handler.param_info(index_usize);
+            if p.param_type().is_string_type() {
+                let ptr = unsafe { input.NewParameterValue.PointerValue as *const c_char };
+                let value = if ptr.is_null() {
+                    ""
+                } else {
+                    unsafe { CStr::from_ptr(ptr) }
+                        .to_str()
+                        .unwrap_or("")
+                };
+                instance
+                    .context(e!("No instance"))?
+                    .renderer
+                    .set_text_param(index_usize, value);
+            } else {
+                let new_value =
+                    unsafe { std::mem::transmute::<u32, f32>(input.NewParameterValue.UIntValue) };
+                instance
+                    .context(e!("No instance"))?
+                    .renderer
+                    .set_param(index_usize, new_value);
+            }
 
             SuccessVal::Success.into()
         }
@@ -312,6 +345,20 @@ pub fn default_ffgl_entry<H: FFGLHandler + 'static>(
 
             debug!(v = ?viewport, "RESIZE");
             SuccessVal::Success.into()
+        }
+
+        Op::GetNumFileParameterExtensions => {
+            let index = unsafe { input_value.num } as usize;
+            let extensions = handler.param_info(index).file_extensions();
+            (extensions.len() as u32).into()
+        }
+
+        Op::GetFileParameterExtension => {
+            let input: &GetFileParameterExtensionStruct = unsafe { input_value.as_ref() };
+            let param_index = input.ParameterNumber as usize;
+            let ext_index = input.ExtensionNumber as usize;
+            let extensions = handler.param_info(param_index).file_extensions();
+            FFGLVal::from(extensions[ext_index].as_ptr())
         }
 
         Op::Connect => SuccessVal::Success.into(),

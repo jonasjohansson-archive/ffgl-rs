@@ -23,8 +23,42 @@ use glium::uniforms::Uniforms;
 
 use isf::Isf;
 
+use std::collections::HashSet;
+
 pub const ISF_SOURCE: &'static str = include_str!(env!("ISF_SOURCE"));
 pub const ISF_NAME: &'static str = env!("ISF_NAME");
+
+/// Parse the raw ISF JSON header to find image inputs with "FILE": true
+fn parse_file_image_names(source: &str) -> HashSet<String> {
+    let mut result = HashSet::new();
+    // ISF JSON is between /*{ and }*/
+    if let Some(start) = source.find("/*{") {
+        if let Some(end) = source.find("}*/") {
+            let json_str = &source[start + 2..end + 1]; // include the braces
+            if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_str) {
+                if let Some(inputs) = val.get("INPUTS").and_then(|v| v.as_array()) {
+                    for input in inputs {
+                        let is_image = input
+                            .get("TYPE")
+                            .and_then(|v| v.as_str())
+                            .map(|s| s == "image")
+                            .unwrap_or(false);
+                        let is_file = input
+                            .get("FILE")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false);
+                        if is_image && is_file {
+                            if let Some(name) = input.get("NAME").and_then(|v| v.as_str()) {
+                                result.insert(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    result
+}
 
 #[derive(Debug, Clone)]
 pub struct IsfFFGLState {
@@ -59,14 +93,24 @@ impl FFGLHandler for IsfFFGLState {
         let _span = span.enter();
 
         let info = isf::parse(ISF_SOURCE).unwrap();
-        let shader_params: Vec<param::IsfShaderParam> = info
+        let file_image_names = parse_file_image_names(ISF_SOURCE);
+
+        let shader_params: Vec<param::IsfFFGLParam> = info
             .inputs
             .iter()
             .cloned()
-            .map(|input| param::IsfShaderParam::new(input))
+            .map(|input| {
+                if input.ty == isf::InputType::Image && file_image_names.contains(&input.name) {
+                    param::IsfFFGLParam::FileImage(param::FileImageParam::new(&input.name))
+                } else {
+                    param::IsfFFGLParam::Isf(param::IsfShaderParam::new(input))
+                }
+            })
             .collect();
 
-        let plugin_type = if shader_params.iter().any(|x| x.ty == isf::InputType::Image) {
+        // Count non-file image inputs to determine if this is an effect
+        let has_video_input = shader_params.iter().any(|p| matches!(p, param::IsfFFGLParam::Isf(sp) if sp.ty == isf::InputType::Image));
+        let plugin_type = if has_video_input {
             info::PluginType::Effect
         } else {
             info::PluginType::Source
@@ -79,11 +123,7 @@ impl FFGLHandler for IsfFFGLState {
 
         let params: Vec<param::IsfFFGLParam> = basic_params
             .into_iter()
-            .chain(
-                shader_params
-                    .into_iter()
-                    .map(|p| param::IsfFFGLParam::Isf(p)),
-            )
+            .chain(shader_params.into_iter())
             .collect();
 
         let mut name = [0; 16];

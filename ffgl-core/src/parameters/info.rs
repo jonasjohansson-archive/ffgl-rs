@@ -25,6 +25,8 @@ pub enum ParameterTypes {
     Saturation = FF_TYPE_SATURATION,
     Brightness = FF_TYPE_BRIGHTNESS,
     Alpha = FF_TYPE_ALPHA,
+    File = FF_TYPE_FILE,
+    Text = FF_TYPE_TEXT,
 }
 
 impl From<ParameterTypes> for FFGLVal {
@@ -36,6 +38,10 @@ impl From<ParameterTypes> for FFGLVal {
 impl ParameterTypes {
     pub fn default_value(&self) -> f32 {
         0.0
+    }
+
+    pub fn is_string_type(&self) -> bool {
+        matches!(self, ParameterTypes::File | ParameterTypes::Text)
     }
 }
 
@@ -106,6 +112,14 @@ pub trait ParamInfo {
     fn group(&self) -> &str {
         ""
     }
+
+    fn default_string_val(&self) -> &CStr {
+        c""
+    }
+
+    fn file_extensions(&self) -> &[CString] {
+        &[]
+    }
 }
 
 pub trait ParamValue {
@@ -133,6 +147,8 @@ pub struct SimpleParamInfo {
     pub group: Option<String>,
     pub display_name: Option<String>,
     pub elements: Option<Vec<(CString, f32)>>,
+    pub default_string: Option<CString>,
+    pub file_extensions: Option<Vec<CString>>,
 }
 
 impl SimpleParamInfo {
@@ -196,5 +212,13 @@ impl ParamInfo for SimpleParamInfo {
 
     fn num_elements(&self) -> usize {
         self.elements.as_ref().map(|x| x.len()).unwrap_or(1)
+    }
+
+    fn default_string_val(&self) -> &CStr {
+        self.default_string.as_deref().unwrap_or(c"")
+    }
+
+    fn file_extensions(&self) -> &[CString] {
+        self.file_extensions.as_deref().unwrap_or(&[])
     }
 }

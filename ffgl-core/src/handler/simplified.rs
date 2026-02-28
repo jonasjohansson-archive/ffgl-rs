@@ -7,6 +7,8 @@ use super::FFGLHandler;
 
 use crate::parameters::ParamInfo;
 
+use std::os::raw::c_char;
+
 use crate::{FFGLData, GLInput};
 
 use super::FFGLInstance;
@@ -36,6 +38,11 @@ pub trait SimpleFFGLInstance: FFGLInstance + Send + Sync {
         panic!("No params")
     }
 
+    fn get_text_param(&self, _index: usize) -> *const c_char {
+        std::ptr::null()
+    }
+    fn set_text_param(&mut self, _index: usize, _value: &str) {}
+
     ///Called by [crate::conversions::Op::ProcessOpenGL] to draw the plugin
     fn draw(&mut self, inst_data: &FFGLData, frame_data: GLInput);
 }
@@ -47,6 +54,14 @@ impl<T: SimpleFFGLInstance> FFGLInstance for T {
 
     fn set_param(&mut self, index: usize, value: f32) {
         SimpleFFGLInstance::set_param(self, index, value)
+    }
+
+    fn get_text_param(&self, index: usize) -> *const c_char {
+        SimpleFFGLInstance::get_text_param(self, index)
+    }
+
+    fn set_text_param(&mut self, index: usize, value: &str) {
+        SimpleFFGLInstance::set_text_param(self, index, value)
     }
 
     fn draw(&mut self, inst_data: &FFGLData, frame_data: GLInput) {

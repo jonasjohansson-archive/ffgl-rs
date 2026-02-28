@@ -743,6 +743,7 @@ dependencies = [
  "ffgl-glium",
  "genmesh",
  "glium",
+ "image 0.24.9",
  "isf",
  "lazy_static",
  "rand 0.8.5",

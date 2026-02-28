@@ -8,6 +8,8 @@ use std;
 use std::error::Error;
 use std::fmt::Debug;
 
+use std::os::raw::c_char;
+
 use crate::inputs::FFGLData;
 
 use crate::{info, inputs::GLInput, parameters};
@@ -31,6 +33,11 @@ impl<I> Debug for Instance<I> {
 pub trait FFGLInstance {
     fn get_param(&self, index: usize) -> f32;
     fn set_param(&mut self, index: usize, value: f32);
+
+    fn get_text_param(&self, _index: usize) -> *const c_char {
+        std::ptr::null()
+    }
+    fn set_text_param(&mut self, _index: usize, _value: &str) {}
 
     ///Called by [crate::conversions::Op::ProcessOpenGL] to draw the plugin
     fn draw(&mut self, inst_data: &FFGLData, frame_data: GLInput);

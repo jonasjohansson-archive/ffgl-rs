@@ -63,6 +63,9 @@ pub enum Op {
     GetParameterDisplayName = FF_GET_PARAM_DISPLAY_NAME,
 
     EnablePluginCap = FF_ENABLE_PLUGIN_CAP,
+
+    GetNumFileParameterExtensions = FF_GET_NUM_FILE_PARAMETER_EXTENSIONS,
+    GetFileParameterExtension = FF_GET_FILE_PARAMETER_EXTENSION,
 }
 
 impl Op {
