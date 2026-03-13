@@ -12,6 +12,7 @@ use ffgl_core::{
 };
 use gl::types::*;
 
+use crate::mqtt::MqttHandle;
 use crate::shader;
 
 // ---------------------------------------------------------------------------
@@ -229,6 +230,7 @@ pub struct PulseBeam {
     mqtt_port: CString,
     mqtt_topic: CString,
     mqtt_trigger: Arc<AtomicBool>,
+    mqtt_handle: Option<MqttHandle>,
 }
 
 impl PulseBeam {
@@ -327,6 +329,19 @@ impl SimpleFFGLInstance for PulseBeam {
 
             let now = Instant::now();
 
+            let mqtt_trigger = Arc::new(AtomicBool::new(false));
+            let mqtt_host = CString::new("127.0.0.1").unwrap();
+            let mqtt_port = CString::new("1883").unwrap();
+            let mqtt_topic = CString::new("pulsebeam/trigger").unwrap();
+
+            let port: u16 = mqtt_port.to_str().unwrap_or("1883").parse().unwrap_or(1883);
+            let mqtt_handle = Some(MqttHandle::new(
+                mqtt_host.to_str().unwrap_or("127.0.0.1"),
+                port,
+                mqtt_topic.to_str().unwrap_or("pulsebeam/trigger"),
+                mqtt_trigger.clone(),
+            ));
+
             PulseBeam {
                 vao,
                 vbo,
@@ -349,10 +364,11 @@ impl SimpleFFGLInstance for PulseBeam {
                 trail_length: 0.3,
                 trail_softness: 0.5,
                 color: [1.0, 1.0, 1.0, 1.0],
-                mqtt_host: CString::new("127.0.0.1").unwrap(),
-                mqtt_port: CString::new("1883").unwrap(),
-                mqtt_topic: CString::new("pulsebeam/trigger").unwrap(),
-                mqtt_trigger: Arc::new(AtomicBool::new(false)),
+                mqtt_host,
+                mqtt_port,
+                mqtt_topic,
+                mqtt_trigger,
+                mqtt_handle,
             }
         }
     }
@@ -426,8 +442,23 @@ impl SimpleFFGLInstance for PulseBeam {
                 PARAM_MQTT_HOST => self.mqtt_host = cstr,
                 PARAM_MQTT_PORT => self.mqtt_port = cstr,
                 PARAM_MQTT_TOPIC => self.mqtt_topic = cstr,
-                _ => {}
+                _ => return,
             }
+
+            // Reconnect MQTT with updated parameters
+            self.mqtt_handle = None;
+            let port: u16 = self
+                .mqtt_port
+                .to_str()
+                .unwrap_or("1883")
+                .parse()
+                .unwrap_or(1883);
+            self.mqtt_handle = Some(MqttHandle::new(
+                self.mqtt_host.to_str().unwrap_or("127.0.0.1"),
+                port,
+                self.mqtt_topic.to_str().unwrap_or("pulsebeam/trigger"),
+                self.mqtt_trigger.clone(),
+            ));
         }
     }
 
