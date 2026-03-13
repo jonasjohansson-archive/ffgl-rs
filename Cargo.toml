@@ -13,6 +13,7 @@ members = [
     "ffgl-isf",
     "build-common",
     "example-sdfer", "shadertoy",
+    "pulse-beam",
 ]
 default-members = ["ffgl-core"]
 
