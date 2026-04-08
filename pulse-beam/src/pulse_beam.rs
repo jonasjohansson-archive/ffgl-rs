@@ -21,19 +21,29 @@ use crate::shader;
 
 const PARAM_TRIGGER: usize = 0;
 const PARAM_DURATION: usize = 1;
-const PARAM_ROTATION: usize = 2;
+const PARAM_DIRECTION: usize = 2;
 const PARAM_LINE_WIDTH: usize = 3;
 const PARAM_TRAIL_LENGTH: usize = 4;
 const PARAM_TRAIL_SOFTNESS: usize = 5;
-const PARAM_COLOR_R: usize = 6;
-const PARAM_COLOR_G: usize = 7;
-const PARAM_COLOR_B: usize = 8;
-const PARAM_COLOR_A: usize = 9;
-const PARAM_MQTT_HOST: usize = 10;
-const PARAM_MQTT_PORT: usize = 11;
-const PARAM_MQTT_TOPIC: usize = 12;
-const NUM_PARAMS: usize = 13;
-const MAX_PULSES: usize = 4;
+const PARAM_START_R: usize = 6;
+const PARAM_START_G: usize = 7;
+const PARAM_START_B: usize = 8;
+const PARAM_START_A: usize = 9;
+const PARAM_END_R: usize = 10;
+const PARAM_END_G: usize = 11;
+const PARAM_END_B: usize = 12;
+const PARAM_END_A: usize = 13;
+const PARAM_MQTT_HOST: usize = 14;
+const PARAM_MQTT_PORT: usize = 15;
+const PARAM_MQTT_TOPIC: usize = 16;
+const NUM_PARAMS: usize = 17;
+const MAX_PULSES: usize = 8;
+
+// Direction values
+const DIR_UP: f32 = 0.0;
+const DIR_DOWN: f32 = 1.0;
+const DIR_LEFT: f32 = 2.0;
+const DIR_RIGHT: f32 = 3.0;
 
 // ---------------------------------------------------------------------------
 // Pulse
@@ -64,41 +74,56 @@ static FS_SRC: &str = "\
 in vec2 v_uv;
 out vec4 out_color;
 
-uniform float u_pulse_progress[4];
-uniform float u_rotation;
+uniform float u_pulse_progress[8];
+uniform float u_direction;
 uniform float u_line_width;
 uniform float u_trail_length;
 uniform float u_trail_softness;
-uniform vec4 u_color;
+uniform vec4 u_start_color;
+uniform vec4 u_end_color;
 
 void main() {
-    float angle = u_rotation * 6.28318530718;
-    vec2 center = v_uv - 0.5;
-    float rotated = dot(center, vec2(-sin(angle), cos(angle))) + 0.5;
+    // Map direction to axis: 0=up, 1=down, 2=left, 3=right
+    float coord;
+    int dir = int(u_direction + 0.5);
+    if (dir == 0)      coord = v_uv.y;         // up: bottom to top
+    else if (dir == 1) coord = 1.0 - v_uv.y;   // down: top to bottom
+    else if (dir == 2) coord = 1.0 - v_uv.x;   // left: right to left
+    else               coord = v_uv.x;          // right: left to right
 
-    float total_intensity = 0.0;
+    vec4 total_color = vec4(0.0);
 
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 8; i++) {
         float progress = u_pulse_progress[i];
         if (progress < 0.0) continue;
 
-        float dist = progress - rotated;
+        float dist = progress - coord;
 
+        // Leading edge: bright core
         float line = 1.0 - smoothstep(0.0, u_line_width, abs(dist));
 
+        // Trail behind the line
         float trail = 0.0;
+        float grad_t = 0.0;
         if (dist > 0.0 && dist < u_trail_length) {
             float t = dist / max(u_trail_length, 0.001);
             float linear_fade = 1.0 - t;
             float smooth_fade = 1.0 - smoothstep(0.0, 1.0, t);
             trail = mix(linear_fade, smooth_fade, u_trail_softness);
+            grad_t = t;
         }
 
-        total_intensity += max(line, trail);
+        // Combine: intensity envelope separate from color gradient
+        float intensity = max(line, trail);
+        if (intensity > 0.001) {
+            float color_t = 0.0;
+            if (trail >= line) color_t = grad_t;
+            vec4 color = mix(u_start_color, u_end_color, color_t);
+            total_color += vec4(color.rgb * intensity, color.a * intensity);
+        }
     }
 
-    total_intensity = clamp(total_intensity, 0.0, 1.0);
-    out_color = u_color * total_intensity;
+    out_color = clamp(total_color, 0.0, 1.0);
 }
 ";
 
@@ -121,11 +146,19 @@ static PARAM_INFOS: LazyLock<[SimpleParamInfo; NUM_PARAMS]> = LazyLock::new(|| {
             default: Some(0.18),
             ..Default::default()
         },
-        // 2 – Rotation
+        // 2 – Direction
         SimpleParamInfo {
-            name: CString::new("Rotation").unwrap(),
-            param_type: ParameterTypes::Standard,
+            name: CString::new("Direction").unwrap(),
+            param_type: ParameterTypes::Option,
             default: Some(0.0),
+            min: Some(0.0),
+            max: Some(3.0),
+            elements: Some(vec![
+                (CString::new("Up").unwrap(), 0.0),
+                (CString::new("Down").unwrap(), 1.0),
+                (CString::new("Left").unwrap(), 2.0),
+                (CString::new("Right").unwrap(), 3.0),
+            ]),
             ..Default::default()
         },
         // 3 – Line Width
@@ -149,53 +182,85 @@ static PARAM_INFOS: LazyLock<[SimpleParamInfo; NUM_PARAMS]> = LazyLock::new(|| {
             default: Some(0.5),
             ..Default::default()
         },
-        // 6 – Color R
+        // 6 – Start Color R
         SimpleParamInfo {
-            name: CString::new("Color R").unwrap(),
+            name: CString::new("Start R").unwrap(),
             param_type: ParameterTypes::Red,
             default: Some(1.0),
-            group: Some("Color".to_string()),
+            group: Some("Start Color".to_string()),
             ..Default::default()
         },
-        // 7 – Color G
+        // 7 – Start Color G
         SimpleParamInfo {
-            name: CString::new("Color G").unwrap(),
+            name: CString::new("Start G").unwrap(),
             param_type: ParameterTypes::Green,
             default: Some(1.0),
-            group: Some("Color".to_string()),
+            group: Some("Start Color".to_string()),
             ..Default::default()
         },
-        // 8 – Color B
+        // 8 – Start Color B
         SimpleParamInfo {
-            name: CString::new("Color B").unwrap(),
+            name: CString::new("Start B").unwrap(),
             param_type: ParameterTypes::Blue,
             default: Some(1.0),
-            group: Some("Color".to_string()),
+            group: Some("Start Color".to_string()),
             ..Default::default()
         },
-        // 9 – Color A
+        // 9 – Start Color A
         SimpleParamInfo {
-            name: CString::new("Color A").unwrap(),
+            name: CString::new("Start A").unwrap(),
             param_type: ParameterTypes::Alpha,
             default: Some(1.0),
-            group: Some("Color".to_string()),
+            group: Some("Start Color".to_string()),
             ..Default::default()
         },
-        // 10 – MQTT Host
+        // 10 – End Color R
+        SimpleParamInfo {
+            name: CString::new("End R").unwrap(),
+            param_type: ParameterTypes::Red,
+            default: Some(0.0),
+            group: Some("End Color".to_string()),
+            ..Default::default()
+        },
+        // 11 – End Color G
+        SimpleParamInfo {
+            name: CString::new("End G").unwrap(),
+            param_type: ParameterTypes::Green,
+            default: Some(0.0),
+            group: Some("End Color".to_string()),
+            ..Default::default()
+        },
+        // 12 – End Color B
+        SimpleParamInfo {
+            name: CString::new("End B").unwrap(),
+            param_type: ParameterTypes::Blue,
+            default: Some(0.0),
+            group: Some("End Color".to_string()),
+            ..Default::default()
+        },
+        // 13 – End Color A
+        SimpleParamInfo {
+            name: CString::new("End A").unwrap(),
+            param_type: ParameterTypes::Alpha,
+            default: Some(1.0),
+            group: Some("End Color".to_string()),
+            ..Default::default()
+        },
+        // 14 – MQTT Host
         SimpleParamInfo {
             name: CString::new("MQTT Host").unwrap(),
             param_type: ParameterTypes::Text,
             default_string: Some(CString::new("127.0.0.1").unwrap()),
             ..Default::default()
         },
-        // 11 – MQTT Port
+        // 15 – MQTT Port
         SimpleParamInfo {
             name: CString::new("MQTT Port").unwrap(),
             param_type: ParameterTypes::Text,
             default_string: Some(CString::new("1883").unwrap()),
             ..Default::default()
         },
-        // 12 – MQTT Topic
+        // 16 – MQTT Topic
         SimpleParamInfo {
             name: CString::new("MQTT Topic").unwrap(),
             param_type: ParameterTypes::Text,
@@ -214,18 +279,20 @@ pub struct PulseBeam {
     vbo: GLuint,
     program: GLuint,
     u_pulse_progress: GLint,
-    u_rotation: GLint,
+    u_direction: GLint,
     u_line_width: GLint,
     u_trail_length: GLint,
     u_trail_softness: GLint,
-    u_color: GLint,
+    u_start_color: GLint,
+    u_end_color: GLint,
     pulses: [Pulse; MAX_PULSES],
     duration: f32,
-    rotation: f32,
+    direction: f32,
     line_width: f32,
     trail_length: f32,
     trail_softness: f32,
-    color: [f32; 4],
+    start_color: [f32; 4],
+    end_color: [f32; 4],
     mqtt_host: CString,
     mqtt_port: CString,
     mqtt_topic: CString,
@@ -311,13 +378,14 @@ impl SimpleFFGLInstance for PulseBeam {
             // Uniform locations
             let u_pulse_progress =
                 gl::GetUniformLocation(program, c"u_pulse_progress".as_ptr());
-            let u_rotation = gl::GetUniformLocation(program, c"u_rotation".as_ptr());
+            let u_direction = gl::GetUniformLocation(program, c"u_direction".as_ptr());
             let u_line_width = gl::GetUniformLocation(program, c"u_line_width".as_ptr());
             let u_trail_length =
                 gl::GetUniformLocation(program, c"u_trail_length".as_ptr());
             let u_trail_softness =
                 gl::GetUniformLocation(program, c"u_trail_softness".as_ptr());
-            let u_color = gl::GetUniformLocation(program, c"u_color".as_ptr());
+            let u_start_color = gl::GetUniformLocation(program, c"u_start_color".as_ptr());
+            let u_end_color = gl::GetUniformLocation(program, c"u_end_color".as_ptr());
 
             // Unbind
             gl::BindVertexArray(0);
@@ -347,23 +415,20 @@ impl SimpleFFGLInstance for PulseBeam {
                 vbo,
                 program,
                 u_pulse_progress,
-                u_rotation,
+                u_direction,
                 u_line_width,
                 u_trail_length,
                 u_trail_softness,
-                u_color,
-                pulses: [
-                    Pulse { active: false, start_time: now },
-                    Pulse { active: false, start_time: now },
-                    Pulse { active: false, start_time: now },
-                    Pulse { active: false, start_time: now },
-                ],
+                u_start_color,
+                u_end_color,
+                pulses: std::array::from_fn(|_| Pulse { active: false, start_time: now }),
                 duration: 0.18,
-                rotation: 0.0,
+                direction: DIR_UP,
                 line_width: 0.095,
                 trail_length: 0.3,
                 trail_softness: 0.5,
-                color: [1.0, 1.0, 1.0, 1.0],
+                start_color: [1.0, 1.0, 1.0, 1.0],
+                end_color: [0.0, 0.0, 0.0, 1.0],
                 mqtt_host,
                 mqtt_port,
                 mqtt_topic,
@@ -395,14 +460,18 @@ impl SimpleFFGLInstance for PulseBeam {
         match index {
             PARAM_TRIGGER => 0.0,
             PARAM_DURATION => self.duration,
-            PARAM_ROTATION => self.rotation,
+            PARAM_DIRECTION => self.direction,
             PARAM_LINE_WIDTH => self.line_width,
             PARAM_TRAIL_LENGTH => self.trail_length,
             PARAM_TRAIL_SOFTNESS => self.trail_softness,
-            PARAM_COLOR_R => self.color[0],
-            PARAM_COLOR_G => self.color[1],
-            PARAM_COLOR_B => self.color[2],
-            PARAM_COLOR_A => self.color[3],
+            PARAM_START_R => self.start_color[0],
+            PARAM_START_G => self.start_color[1],
+            PARAM_START_B => self.start_color[2],
+            PARAM_START_A => self.start_color[3],
+            PARAM_END_R => self.end_color[0],
+            PARAM_END_G => self.end_color[1],
+            PARAM_END_B => self.end_color[2],
+            PARAM_END_A => self.end_color[3],
             _ => 0.0,
         }
     }
@@ -415,14 +484,18 @@ impl SimpleFFGLInstance for PulseBeam {
                 }
             }
             PARAM_DURATION => self.duration = value,
-            PARAM_ROTATION => self.rotation = value,
+            PARAM_DIRECTION => self.direction = value,
             PARAM_LINE_WIDTH => self.line_width = value,
             PARAM_TRAIL_LENGTH => self.trail_length = value,
             PARAM_TRAIL_SOFTNESS => self.trail_softness = value,
-            PARAM_COLOR_R => self.color[0] = value,
-            PARAM_COLOR_G => self.color[1] = value,
-            PARAM_COLOR_B => self.color[2] = value,
-            PARAM_COLOR_A => self.color[3] = value,
+            PARAM_START_R => self.start_color[0] = value,
+            PARAM_START_G => self.start_color[1] = value,
+            PARAM_START_B => self.start_color[2] = value,
+            PARAM_START_A => self.start_color[3] = value,
+            PARAM_END_R => self.end_color[0] = value,
+            PARAM_END_G => self.end_color[1] = value,
+            PARAM_END_B => self.end_color[2] = value,
+            PARAM_END_A => self.end_color[3] = value,
             _ => {}
         }
     }
@@ -494,17 +567,24 @@ impl SimpleFFGLInstance for PulseBeam {
             gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
             gl::UseProgram(self.program);
 
-            gl::Uniform1fv(self.u_pulse_progress, 4, progress_values.as_ptr());
-            gl::Uniform1f(self.u_rotation, self.rotation);
+            gl::Uniform1fv(self.u_pulse_progress, MAX_PULSES as i32, progress_values.as_ptr());
+            gl::Uniform1f(self.u_direction, self.direction);
             gl::Uniform1f(self.u_line_width, self.line_width * 0.199 + 0.001);
             gl::Uniform1f(self.u_trail_length, self.trail_length);
             gl::Uniform1f(self.u_trail_softness, self.trail_softness);
             gl::Uniform4f(
-                self.u_color,
-                self.color[0],
-                self.color[1],
-                self.color[2],
-                self.color[3],
+                self.u_start_color,
+                self.start_color[0],
+                self.start_color[1],
+                self.start_color[2],
+                self.start_color[3],
+            );
+            gl::Uniform4f(
+                self.u_end_color,
+                self.end_color[0],
+                self.end_color[1],
+                self.end_color[2],
+                self.end_color[3],
             );
 
             gl::BindVertexArray(self.vao);

@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__google-docs__getSpreadsheetInfo",
+      "mcp__google-docs__readSpreadsheet",
+      "mcp__google-docs__writeSpreadsheet",
+      "mcp__airtable__list_bases",
+      "mcp__airtable__list_tables",
+      "mcp__airtable__describe_table",
+      "mcp__airtable__create_record"
+    ],
+    "additionalDirectories": [
+      "/Users/jonas/Documents/GitHub/org/jonasjohansson/resolume-ffgl"
+    ]
+  }
+}
