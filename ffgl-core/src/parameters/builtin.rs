@@ -33,6 +33,6 @@ impl ParamInfo for OverlayParams {
     }
 
     fn group(&self) -> &str {
-        "opts"
+        ""
     }
 }

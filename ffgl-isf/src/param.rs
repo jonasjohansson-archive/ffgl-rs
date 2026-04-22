@@ -130,15 +130,17 @@ fn param_info_for_isf_input(isf::Input { name, ty }: &isf::Input) -> Vec<SimpleP
     match ty {
         InputType::Point2d(x) => (0..2)
             .map(|i| {
-                let disp_name = match i {
-                    0 => "x",
-                    1 => "y",
+                let component = match i {
+                    0 => "X",
+                    1 => "Y",
                     _ => unreachable!("Index out of bounds for Point2d input type"),
-                }
-                .to_string();
+                };
 
-                let p_name =
-                    CString::new(format!("{name} {disp_name}")).expect("Failed to create CString");
+                let base = display_name_from_camel(name);
+                let disp_name = format!("{base} {component}");
+
+                let p_name = CString::new(disp_name.clone())
+                    .expect("Failed to create CString");
 
                 let param_type = match i {
                     0 => ParameterTypes::X,
@@ -152,7 +154,6 @@ fn param_info_for_isf_input(isf::Input { name, ty }: &isf::Input) -> Vec<SimpleP
                     default: x.default.map(|x| x[i] as f32),
                     min: x.min.map(|x| x[i] as f32),
                     max: x.max.map(|x| x[i] as f32),
-                    group: Some(name.clone()),
                     display_name: Some(disp_name),
                     ..Default::default()
                 }
@@ -160,17 +161,19 @@ fn param_info_for_isf_input(isf::Input { name, ty }: &isf::Input) -> Vec<SimpleP
             .collect(),
         InputType::Color(x) => (0..4)
             .map(|i| {
-                let disp_name = match i {
-                    0 => "red",
-                    1 => "green",
-                    2 => "blue",
-                    3 => "alpha",
+                let component = match i {
+                    0 => "R",
+                    1 => "G",
+                    2 => "B",
+                    3 => "A",
                     _ => unreachable!("Index out of bounds for Color input type"),
-                }
-                .to_string();
+                };
 
-                let p_name =
-                    CString::new(format!("{name} {disp_name}")).expect("Failed to create CString");
+                let base = display_name_from_camel(name);
+                let disp_name = format!("{base} {component}");
+
+                let p_name = CString::new(disp_name.clone())
+                    .expect("Failed to create CString");
 
                 let param_type = match i {
                     0 => ParameterTypes::Red,
@@ -186,7 +189,6 @@ fn param_info_for_isf_input(isf::Input { name, ty }: &isf::Input) -> Vec<SimpleP
                     default: x.default.as_ref().map(|x| x[i] as f32),
                     min: x.min.as_ref().map(|x| x[i] as f32),
                     max: x.max.as_ref().map(|x| x[i] as f32),
-                    group: Some(name.clone()),
                     display_name: Some(disp_name),
                     ..Default::default()
                 }
