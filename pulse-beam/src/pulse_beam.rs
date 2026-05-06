@@ -1,7 +1,7 @@
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::{atomic::AtomicBool, Arc, LazyLock};
+use std::sync::{atomic::AtomicBool, Arc, LazyLock, OnceLock};
 use std::time::Instant;
 
 use ffgl_core::{
@@ -12,7 +12,7 @@ use ffgl_core::{
 };
 use gl::types::*;
 
-use crate::mqtt::MqttHandle;
+use crate::mqtt::{MqttFilter, MqttHandle};
 use crate::shader;
 
 // ---------------------------------------------------------------------------
@@ -36,8 +36,15 @@ const PARAM_END_A: usize = 13;
 const PARAM_MQTT_HOST: usize = 14;
 const PARAM_MQTT_PORT: usize = 15;
 const PARAM_MQTT_TOPIC: usize = 16;
-const NUM_PARAMS: usize = 17;
+const PARAM_JSON_FIELD: usize = 17;
+const PARAM_MIN_VALUE: usize = 18;
+const PARAM_NAME: usize = 19;
+const NUM_PARAMS: usize = 20;
 const MAX_PULSES: usize = 8;
+
+const DEFAULT_HOST: &str = "tnt.local";
+const DEFAULT_PORT: &str = "1883";
+const DEFAULT_TOPIC: &str = "pulsebeam/trigger";
 
 // Direction values
 const DIR_UP: f32 = 0.0;
@@ -250,31 +257,63 @@ static PARAM_INFOS: LazyLock<[SimpleParamInfo; NUM_PARAMS]> = LazyLock::new(|| {
         SimpleParamInfo {
             name: CString::new("MQTT Host").unwrap(),
             param_type: ParameterTypes::Text,
-            default_string: Some(CString::new("127.0.0.1").unwrap()),
+            default_string: Some(CString::new(DEFAULT_HOST).unwrap()),
             ..Default::default()
         },
         // 15 – MQTT Port
         SimpleParamInfo {
             name: CString::new("MQTT Port").unwrap(),
             param_type: ParameterTypes::Text,
-            default_string: Some(CString::new("1883").unwrap()),
+            default_string: Some(CString::new(DEFAULT_PORT).unwrap()),
             ..Default::default()
         },
         // 16 – MQTT Topic
         SimpleParamInfo {
             name: CString::new("MQTT Topic").unwrap(),
             param_type: ParameterTypes::Text,
-            default_string: Some(CString::new("pulsebeam/trigger").unwrap()),
+            default_string: Some(CString::new(DEFAULT_TOPIC).unwrap()),
+            ..Default::default()
+        },
+        // 17 – JSON Field (empty = fire on any message; set to e.g. "level"
+        // or "harmony_value" to only fire when payload[field] >= Min Value,
+        // or when payload[field] is boolean true)
+        SimpleParamInfo {
+            name: CString::new("JSON Field").unwrap(),
+            param_type: ParameterTypes::Text,
+            default_string: Some(CString::new("").unwrap()),
+            ..Default::default()
+        },
+        // 18 – Min Value (numeric threshold, used only when JSON Field is set)
+        SimpleParamInfo {
+            name: CString::new("Min Value").unwrap(),
+            param_type: ParameterTypes::Text,
+            default_string: Some(CString::new("0").unwrap()),
+            ..Default::default()
+        },
+        // 19 – Name (metadata; external tools find this PulseBeam by name)
+        SimpleParamInfo {
+            name: CString::new("Name").unwrap(),
+            param_type: ParameterTypes::Text,
+            default_string: Some(CString::new("").unwrap()),
             ..Default::default()
         },
     ]
 });
 
 // ---------------------------------------------------------------------------
-// PulseBeam struct
+// Shared GL resources
 // ---------------------------------------------------------------------------
+//
+// All PulseBeam instances draw the same fullscreen quad with the same
+// shader; only uniforms differ per draw call. Compiling the shader and
+// allocating VAO/VBO per instance was costing ~100–300 ms each on macOS
+// — felt like load lag with even a handful of instances. Sharing one set
+// across the process eliminates that.
+//
+// Initialization happens on first use, which is a new() or draw() call —
+// both run on Resolume's render thread with a valid GL context.
 
-pub struct PulseBeam {
+struct GlResources {
     vao: GLuint,
     vbo: GLuint,
     program: GLuint,
@@ -285,6 +324,75 @@ pub struct PulseBeam {
     u_trail_softness: GLint,
     u_start_color: GLint,
     u_end_color: GLint,
+}
+
+// Raw GL handles are u32/i32 — naturally Send + Sync, but OnceLock requires
+// the explicit marker because the wrapper holds them.
+unsafe impl Send for GlResources {}
+unsafe impl Sync for GlResources {}
+
+static GL_RESOURCES: OnceLock<GlResources> = OnceLock::new();
+
+fn gl_resources() -> &'static GlResources {
+    GL_RESOURCES.get_or_init(|| unsafe {
+        gl_loader::init_gl();
+        gl::load_with(|s| gl_loader::get_proc_address(s).cast());
+
+        let vs = shader::compile_shader(VS_SRC, gl::VERTEX_SHADER);
+        let fs = shader::compile_shader(FS_SRC, gl::FRAGMENT_SHADER);
+        let program = shader::link_program(vs, fs);
+
+        let mut vao: GLuint = 0;
+        let mut vbo: GLuint = 0;
+        gl::GenVertexArrays(1, &mut vao);
+        gl::BindVertexArray(vao);
+        gl::GenBuffers(1, &mut vbo);
+        gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
+
+        static VERTEX_DATA: [GLfloat; 8] = [-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
+        gl::BufferData(
+            gl::ARRAY_BUFFER,
+            (VERTEX_DATA.len() * std::mem::size_of::<f32>()) as isize,
+            VERTEX_DATA.as_ptr().cast(),
+            gl::STATIC_DRAW,
+        );
+
+        gl::UseProgram(program);
+        gl::BindFragDataLocation(program, 0, c"out_color".as_ptr());
+
+        let pos_attr = gl::GetAttribLocation(program, c"position".as_ptr());
+        gl::EnableVertexAttribArray(pos_attr as GLuint);
+        gl::VertexAttribPointer(
+            pos_attr as GLuint, 2, gl::FLOAT, gl::FALSE as GLboolean, 0, ptr::null(),
+        );
+
+        let res = GlResources {
+            vao,
+            vbo,
+            program,
+            u_pulse_progress: gl::GetUniformLocation(program, c"u_pulse_progress".as_ptr()),
+            u_direction: gl::GetUniformLocation(program, c"u_direction".as_ptr()),
+            u_line_width: gl::GetUniformLocation(program, c"u_line_width".as_ptr()),
+            u_trail_length: gl::GetUniformLocation(program, c"u_trail_length".as_ptr()),
+            u_trail_softness: gl::GetUniformLocation(program, c"u_trail_softness".as_ptr()),
+            u_start_color: gl::GetUniformLocation(program, c"u_start_color".as_ptr()),
+            u_end_color: gl::GetUniformLocation(program, c"u_end_color".as_ptr()),
+        };
+
+        gl::BindVertexArray(0);
+        gl::UseProgram(0);
+        gl::DeleteShader(vs);
+        gl::DeleteShader(fs);
+
+        res
+    })
+}
+
+// ---------------------------------------------------------------------------
+// PulseBeam struct
+// ---------------------------------------------------------------------------
+
+pub struct PulseBeam {
     pulses: [Pulse; MAX_PULSES],
     duration: f32,
     direction: f32,
@@ -296,8 +404,22 @@ pub struct PulseBeam {
     mqtt_host: CString,
     mqtt_port: CString,
     mqtt_topic: CString,
+    json_field: CString,
+    min_value: CString,
+    name: CString,
     mqtt_trigger: Arc<AtomicBool>,
     mqtt_handle: Option<MqttHandle>,
+}
+
+fn parse_min(s: &CString) -> f64 {
+    s.to_str().unwrap_or("0").trim().parse().unwrap_or(0.0)
+}
+
+fn build_filter(field: &CString, min: &CString) -> MqttFilter {
+    MqttFilter {
+        field: field.to_str().unwrap_or("").to_string(),
+        min: parse_min(min),
+    }
 }
 
 impl PulseBeam {
@@ -328,113 +450,46 @@ impl PulseBeam {
 
 impl SimpleFFGLInstance for PulseBeam {
     fn new(_inst_data: &FFGLData) -> Self {
-        unsafe {
-            gl_loader::init_gl();
-            gl::load_with(|s| gl_loader::get_proc_address(s).cast());
+        // Touch the shared GL setup so the first instance pays the
+        // shader-compile cost once for the whole composition.
+        let _ = gl_resources();
 
-            // Compile & link shaders
-            let vs = shader::compile_shader(VS_SRC, gl::VERTEX_SHADER);
-            let fs = shader::compile_shader(FS_SRC, gl::FRAGMENT_SHADER);
-            let program = shader::link_program(vs, fs);
+        let now = Instant::now();
+        let mqtt_trigger = Arc::new(AtomicBool::new(false));
+        let mqtt_host = CString::new(DEFAULT_HOST).unwrap();
+        let mqtt_port = CString::new(DEFAULT_PORT).unwrap();
+        let mqtt_topic = CString::new(DEFAULT_TOPIC).unwrap();
+        let json_field = CString::new("").unwrap();
+        let min_value = CString::new("0").unwrap();
+        let name = CString::new("").unwrap();
 
-            // Full-screen quad
-            let mut vao: GLuint = 0;
-            let mut vbo: GLuint = 0;
+        let port: u16 = mqtt_port.to_str().unwrap_or(DEFAULT_PORT).parse().unwrap_or(1883);
+        let handle = MqttHandle::new(
+            mqtt_host.to_str().unwrap_or(DEFAULT_HOST),
+            port,
+            mqtt_topic.to_str().unwrap_or(DEFAULT_TOPIC),
+            mqtt_trigger.clone(),
+        );
+        handle.set_filter(build_filter(&json_field, &min_value));
+        let mqtt_handle = Some(handle);
 
-            gl::GenVertexArrays(1, &mut vao);
-            gl::BindVertexArray(vao);
-
-            gl::GenBuffers(1, &mut vbo);
-            gl::BindBuffer(gl::ARRAY_BUFFER, vbo);
-
-            static VERTEX_DATA: [GLfloat; 8] = [-1.0, -1.0, 1.0, -1.0, -1.0, 1.0, 1.0, 1.0];
-
-            gl::BufferData(
-                gl::ARRAY_BUFFER,
-                (VERTEX_DATA.len() * std::mem::size_of::<f32>()) as isize,
-                VERTEX_DATA.as_ptr().cast(),
-                gl::STATIC_DRAW,
-            );
-
-            gl::UseProgram(program);
-
-            // Bind frag data location
-            let out_frag_name = c"out_color";
-            gl::BindFragDataLocation(program, 0, out_frag_name.as_ptr());
-
-            // Vertex attribute
-            let vert_pos_name = c"position";
-            let pos_attr = gl::GetAttribLocation(program, vert_pos_name.as_ptr());
-            gl::EnableVertexAttribArray(pos_attr as GLuint);
-            gl::VertexAttribPointer(
-                pos_attr as GLuint,
-                2,
-                gl::FLOAT,
-                gl::FALSE as GLboolean,
-                0,
-                ptr::null(),
-            );
-
-            // Uniform locations
-            let u_pulse_progress =
-                gl::GetUniformLocation(program, c"u_pulse_progress".as_ptr());
-            let u_direction = gl::GetUniformLocation(program, c"u_direction".as_ptr());
-            let u_line_width = gl::GetUniformLocation(program, c"u_line_width".as_ptr());
-            let u_trail_length =
-                gl::GetUniformLocation(program, c"u_trail_length".as_ptr());
-            let u_trail_softness =
-                gl::GetUniformLocation(program, c"u_trail_softness".as_ptr());
-            let u_start_color = gl::GetUniformLocation(program, c"u_start_color".as_ptr());
-            let u_end_color = gl::GetUniformLocation(program, c"u_end_color".as_ptr());
-
-            // Unbind
-            gl::BindVertexArray(0);
-            gl::UseProgram(0);
-
-            // Clean up individual shader objects
-            gl::DeleteShader(vs);
-            gl::DeleteShader(fs);
-
-            let now = Instant::now();
-
-            let mqtt_trigger = Arc::new(AtomicBool::new(false));
-            let mqtt_host = CString::new("127.0.0.1").unwrap();
-            let mqtt_port = CString::new("1883").unwrap();
-            let mqtt_topic = CString::new("pulsebeam/trigger").unwrap();
-
-            let port: u16 = mqtt_port.to_str().unwrap_or("1883").parse().unwrap_or(1883);
-            let mqtt_handle = Some(MqttHandle::new(
-                mqtt_host.to_str().unwrap_or("127.0.0.1"),
-                port,
-                mqtt_topic.to_str().unwrap_or("pulsebeam/trigger"),
-                mqtt_trigger.clone(),
-            ));
-
-            PulseBeam {
-                vao,
-                vbo,
-                program,
-                u_pulse_progress,
-                u_direction,
-                u_line_width,
-                u_trail_length,
-                u_trail_softness,
-                u_start_color,
-                u_end_color,
-                pulses: std::array::from_fn(|_| Pulse { active: false, start_time: now }),
-                duration: 0.18,
-                direction: DIR_UP,
-                line_width: 0.095,
-                trail_length: 0.3,
-                trail_softness: 0.5,
-                start_color: [1.0, 1.0, 1.0, 1.0],
-                end_color: [0.0, 0.0, 0.0, 1.0],
-                mqtt_host,
-                mqtt_port,
-                mqtt_topic,
-                mqtt_trigger,
-                mqtt_handle,
-            }
+        PulseBeam {
+            pulses: std::array::from_fn(|_| Pulse { active: false, start_time: now }),
+            duration: 0.18,
+            direction: DIR_UP,
+            line_width: 0.095,
+            trail_length: 0.3,
+            trail_softness: 0.5,
+            start_color: [1.0, 1.0, 1.0, 1.0],
+            end_color: [0.0, 0.0, 0.0, 1.0],
+            mqtt_host,
+            mqtt_port,
+            mqtt_topic,
+            json_field,
+            min_value,
+            name,
+            mqtt_trigger,
+            mqtt_handle,
         }
     }
 
@@ -505,33 +560,55 @@ impl SimpleFFGLInstance for PulseBeam {
             PARAM_MQTT_HOST => self.mqtt_host.as_ptr(),
             PARAM_MQTT_PORT => self.mqtt_port.as_ptr(),
             PARAM_MQTT_TOPIC => self.mqtt_topic.as_ptr(),
+            PARAM_JSON_FIELD => self.json_field.as_ptr(),
+            PARAM_MIN_VALUE => self.min_value.as_ptr(),
+            PARAM_NAME => self.name.as_ptr(),
             _ => ptr::null(),
         }
     }
 
     fn set_text_param(&mut self, index: usize, value: &str) {
-        if let Ok(cstr) = CString::new(value) {
-            match index {
-                PARAM_MQTT_HOST => self.mqtt_host = cstr,
-                PARAM_MQTT_PORT => self.mqtt_port = cstr,
-                PARAM_MQTT_TOPIC => self.mqtt_topic = cstr,
-                _ => return,
-            }
+        let Ok(cstr) = CString::new(value) else { return };
 
-            // Reconnect MQTT with updated parameters
+        if index == PARAM_NAME {
+            self.name = cstr;
+            return;
+        }
+
+        let mut needs_reconnect = false;
+        let mut needs_filter_update = false;
+
+        match index {
+            PARAM_MQTT_HOST => { self.mqtt_host = cstr; needs_reconnect = true; }
+            PARAM_MQTT_PORT => { self.mqtt_port = cstr; needs_reconnect = true; }
+            PARAM_MQTT_TOPIC => { self.mqtt_topic = cstr; needs_reconnect = true; }
+            PARAM_JSON_FIELD => { self.json_field = cstr; needs_filter_update = true; }
+            PARAM_MIN_VALUE => { self.min_value = cstr; needs_filter_update = true; }
+            _ => return,
+        }
+
+        let filter = build_filter(&self.json_field, &self.min_value);
+
+        if needs_reconnect {
             self.mqtt_handle = None;
             let port: u16 = self
                 .mqtt_port
                 .to_str()
-                .unwrap_or("1883")
+                .unwrap_or(DEFAULT_PORT)
                 .parse()
                 .unwrap_or(1883);
-            self.mqtt_handle = Some(MqttHandle::new(
-                self.mqtt_host.to_str().unwrap_or("127.0.0.1"),
+            let handle = MqttHandle::new(
+                self.mqtt_host.to_str().unwrap_or(DEFAULT_HOST),
                 port,
-                self.mqtt_topic.to_str().unwrap_or("pulsebeam/trigger"),
+                self.mqtt_topic.to_str().unwrap_or(DEFAULT_TOPIC),
                 self.mqtt_trigger.clone(),
-            ));
+            );
+            handle.set_filter(filter);
+            self.mqtt_handle = Some(handle);
+        } else if needs_filter_update {
+            if let Some(ref h) = self.mqtt_handle {
+                h.set_filter(filter);
+            }
         }
     }
 
@@ -560,34 +637,35 @@ impl SimpleFFGLInstance for PulseBeam {
             }
         }
 
+        let r = gl_resources();
         unsafe {
             gl::ClearColor(0.0, 0.0, 0.0, 0.0);
             gl::Clear(gl::COLOR_BUFFER_BIT);
             gl::Enable(gl::BLEND);
             gl::BlendFunc(gl::SRC_ALPHA, gl::ONE_MINUS_SRC_ALPHA);
-            gl::UseProgram(self.program);
+            gl::UseProgram(r.program);
 
-            gl::Uniform1fv(self.u_pulse_progress, MAX_PULSES as i32, progress_values.as_ptr());
-            gl::Uniform1f(self.u_direction, self.direction);
-            gl::Uniform1f(self.u_line_width, self.line_width * 0.199 + 0.001);
-            gl::Uniform1f(self.u_trail_length, self.trail_length);
-            gl::Uniform1f(self.u_trail_softness, self.trail_softness);
+            gl::Uniform1fv(r.u_pulse_progress, MAX_PULSES as i32, progress_values.as_ptr());
+            gl::Uniform1f(r.u_direction, self.direction);
+            gl::Uniform1f(r.u_line_width, self.line_width * 0.199 + 0.001);
+            gl::Uniform1f(r.u_trail_length, self.trail_length);
+            gl::Uniform1f(r.u_trail_softness, self.trail_softness);
             gl::Uniform4f(
-                self.u_start_color,
+                r.u_start_color,
                 self.start_color[0],
                 self.start_color[1],
                 self.start_color[2],
                 self.start_color[3],
             );
             gl::Uniform4f(
-                self.u_end_color,
+                r.u_end_color,
                 self.end_color[0],
                 self.end_color[1],
                 self.end_color[2],
                 self.end_color[3],
             );
 
-            gl::BindVertexArray(self.vao);
+            gl::BindVertexArray(r.vao);
             gl::DrawArrays(gl::TRIANGLE_STRIP, 0, 4);
 
             // Restore GL state
@@ -598,16 +676,7 @@ impl SimpleFFGLInstance for PulseBeam {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Drop – clean up GL resources
-// ---------------------------------------------------------------------------
-
-impl Drop for PulseBeam {
-    fn drop(&mut self) {
-        unsafe {
-            gl::DeleteBuffers(1, &self.vbo);
-            gl::DeleteVertexArrays(1, &self.vao);
-            gl::DeleteProgram(self.program);
-        }
-    }
-}
+// PulseBeam owns no per-instance GL resources to clean up. The shared
+// GL_RESOURCES set is leaked on purpose: it's freed when the process
+// (and its GL context) exits, and there's no safe way to know when the
+// last instance is dropped to free it earlier.
