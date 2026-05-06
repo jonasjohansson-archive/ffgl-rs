@@ -10,4 +10,3 @@ crate-type = ["cdylib"]
 ffgl-core = { path = "../ffgl-core" }
 gl = "0.14.0"
 gl_loader = "0.1.0"
-rumqttc = "0.24"

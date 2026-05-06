@@ -1,7 +1,7 @@
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::ptr;
-use std::sync::{atomic::AtomicBool, Arc, LazyLock, OnceLock};
+use std::sync::{LazyLock, OnceLock};
 use std::time::Instant;
 
 use ffgl_core::{
@@ -12,7 +12,6 @@ use ffgl_core::{
 };
 use gl::types::*;
 
-use crate::mqtt::{MqttFilter, MqttHandle};
 use crate::shader;
 
 // ---------------------------------------------------------------------------
@@ -33,18 +32,9 @@ const PARAM_END_R: usize = 10;
 const PARAM_END_G: usize = 11;
 const PARAM_END_B: usize = 12;
 const PARAM_END_A: usize = 13;
-const PARAM_MQTT_HOST: usize = 14;
-const PARAM_MQTT_PORT: usize = 15;
-const PARAM_MQTT_TOPIC: usize = 16;
-const PARAM_JSON_FIELD: usize = 17;
-const PARAM_MIN_VALUE: usize = 18;
-const PARAM_NAME: usize = 19;
-const NUM_PARAMS: usize = 20;
+const PARAM_NAME: usize = 14;
+const NUM_PARAMS: usize = 15;
 const MAX_PULSES: usize = 8;
-
-const DEFAULT_HOST: &str = "tnt.local";
-const DEFAULT_PORT: &str = "1883";
-const DEFAULT_TOPIC: &str = "pulsebeam/trigger";
 
 // Direction values
 const DIR_UP: f32 = 0.0;
@@ -253,44 +243,7 @@ static PARAM_INFOS: LazyLock<[SimpleParamInfo; NUM_PARAMS]> = LazyLock::new(|| {
             group: Some("End Color".to_string()),
             ..Default::default()
         },
-        // 14 – MQTT Host
-        SimpleParamInfo {
-            name: CString::new("MQTT Host").unwrap(),
-            param_type: ParameterTypes::Text,
-            default_string: Some(CString::new(DEFAULT_HOST).unwrap()),
-            ..Default::default()
-        },
-        // 15 – MQTT Port
-        SimpleParamInfo {
-            name: CString::new("MQTT Port").unwrap(),
-            param_type: ParameterTypes::Text,
-            default_string: Some(CString::new(DEFAULT_PORT).unwrap()),
-            ..Default::default()
-        },
-        // 16 – MQTT Topic
-        SimpleParamInfo {
-            name: CString::new("MQTT Topic").unwrap(),
-            param_type: ParameterTypes::Text,
-            default_string: Some(CString::new(DEFAULT_TOPIC).unwrap()),
-            ..Default::default()
-        },
-        // 17 – JSON Field (empty = fire on any message; set to e.g. "level"
-        // or "harmony_value" to only fire when payload[field] >= Min Value,
-        // or when payload[field] is boolean true)
-        SimpleParamInfo {
-            name: CString::new("JSON Field").unwrap(),
-            param_type: ParameterTypes::Text,
-            default_string: Some(CString::new("").unwrap()),
-            ..Default::default()
-        },
-        // 18 – Min Value (numeric threshold, used only when JSON Field is set)
-        SimpleParamInfo {
-            name: CString::new("Min Value").unwrap(),
-            param_type: ParameterTypes::Text,
-            default_string: Some(CString::new("0").unwrap()),
-            ..Default::default()
-        },
-        // 19 – Name (metadata; external tools find this PulseBeam by name)
+        // 14 – Name (metadata; external tools find this PulseBeam by name)
         SimpleParamInfo {
             name: CString::new("Name").unwrap(),
             param_type: ParameterTypes::Text,
@@ -401,25 +354,7 @@ pub struct PulseBeam {
     trail_softness: f32,
     start_color: [f32; 4],
     end_color: [f32; 4],
-    mqtt_host: CString,
-    mqtt_port: CString,
-    mqtt_topic: CString,
-    json_field: CString,
-    min_value: CString,
     name: CString,
-    mqtt_trigger: Arc<AtomicBool>,
-    mqtt_handle: Option<MqttHandle>,
-}
-
-fn parse_min(s: &CString) -> f64 {
-    s.to_str().unwrap_or("0").trim().parse().unwrap_or(0.0)
-}
-
-fn build_filter(field: &CString, min: &CString) -> MqttFilter {
-    MqttFilter {
-        field: field.to_str().unwrap_or("").to_string(),
-        min: parse_min(min),
-    }
 }
 
 impl PulseBeam {
@@ -455,23 +390,7 @@ impl SimpleFFGLInstance for PulseBeam {
         let _ = gl_resources();
 
         let now = Instant::now();
-        let mqtt_trigger = Arc::new(AtomicBool::new(false));
-        let mqtt_host = CString::new(DEFAULT_HOST).unwrap();
-        let mqtt_port = CString::new(DEFAULT_PORT).unwrap();
-        let mqtt_topic = CString::new(DEFAULT_TOPIC).unwrap();
-        let json_field = CString::new("").unwrap();
-        let min_value = CString::new("0").unwrap();
         let name = CString::new("").unwrap();
-
-        let port: u16 = mqtt_port.to_str().unwrap_or(DEFAULT_PORT).parse().unwrap_or(1883);
-        let handle = MqttHandle::new(
-            mqtt_host.to_str().unwrap_or(DEFAULT_HOST),
-            port,
-            mqtt_topic.to_str().unwrap_or(DEFAULT_TOPIC),
-            mqtt_trigger.clone(),
-        );
-        handle.set_filter(build_filter(&json_field, &min_value));
-        let mqtt_handle = Some(handle);
 
         PulseBeam {
             pulses: std::array::from_fn(|_| Pulse { active: false, start_time: now }),
@@ -482,14 +401,7 @@ impl SimpleFFGLInstance for PulseBeam {
             trail_softness: 0.5,
             start_color: [1.0, 1.0, 1.0, 1.0],
             end_color: [0.0, 0.0, 0.0, 1.0],
-            mqtt_host,
-            mqtt_port,
-            mqtt_topic,
-            json_field,
-            min_value,
             name,
-            mqtt_trigger,
-            mqtt_handle,
         }
     }
 
@@ -499,7 +411,7 @@ impl SimpleFFGLInstance for PulseBeam {
             name: *b"PulseBeam       ",
             ty: PluginType::Source,
             about: "Triggerable light pulse source".to_string(),
-            description: "A line of light with configurable trail and MQTT trigger".to_string(),
+            description: "A line of light with configurable trail".to_string(),
         }
     }
 
@@ -556,71 +468,15 @@ impl SimpleFFGLInstance for PulseBeam {
     }
 
     fn get_text_param(&self, index: usize) -> *const c_char {
-        match index {
-            PARAM_MQTT_HOST => self.mqtt_host.as_ptr(),
-            PARAM_MQTT_PORT => self.mqtt_port.as_ptr(),
-            PARAM_MQTT_TOPIC => self.mqtt_topic.as_ptr(),
-            PARAM_JSON_FIELD => self.json_field.as_ptr(),
-            PARAM_MIN_VALUE => self.min_value.as_ptr(),
-            PARAM_NAME => self.name.as_ptr(),
-            _ => ptr::null(),
-        }
+        if index == PARAM_NAME { self.name.as_ptr() } else { ptr::null() }
     }
 
     fn set_text_param(&mut self, index: usize, value: &str) {
-        let Ok(cstr) = CString::new(value) else { return };
-
-        if index == PARAM_NAME {
-            self.name = cstr;
-            return;
-        }
-
-        let mut needs_reconnect = false;
-        let mut needs_filter_update = false;
-
-        match index {
-            PARAM_MQTT_HOST => { self.mqtt_host = cstr; needs_reconnect = true; }
-            PARAM_MQTT_PORT => { self.mqtt_port = cstr; needs_reconnect = true; }
-            PARAM_MQTT_TOPIC => { self.mqtt_topic = cstr; needs_reconnect = true; }
-            PARAM_JSON_FIELD => { self.json_field = cstr; needs_filter_update = true; }
-            PARAM_MIN_VALUE => { self.min_value = cstr; needs_filter_update = true; }
-            _ => return,
-        }
-
-        let filter = build_filter(&self.json_field, &self.min_value);
-
-        if needs_reconnect {
-            self.mqtt_handle = None;
-            let port: u16 = self
-                .mqtt_port
-                .to_str()
-                .unwrap_or(DEFAULT_PORT)
-                .parse()
-                .unwrap_or(1883);
-            let handle = MqttHandle::new(
-                self.mqtt_host.to_str().unwrap_or(DEFAULT_HOST),
-                port,
-                self.mqtt_topic.to_str().unwrap_or(DEFAULT_TOPIC),
-                self.mqtt_trigger.clone(),
-            );
-            handle.set_filter(filter);
-            self.mqtt_handle = Some(handle);
-        } else if needs_filter_update {
-            if let Some(ref h) = self.mqtt_handle {
-                h.set_filter(filter);
-            }
-        }
+        if index != PARAM_NAME { return; }
+        if let Ok(cstr) = CString::new(value) { self.name = cstr; }
     }
 
     fn draw(&mut self, _inst_data: &FFGLData, _frame_data: GLInput) {
-        // Check MQTT trigger
-        if self
-            .mqtt_trigger
-            .swap(false, std::sync::atomic::Ordering::Relaxed)
-        {
-            self.fire_pulse();
-        }
-
         let now = Instant::now();
         let duration_secs = self.duration * 4.9 + 0.1;
 
