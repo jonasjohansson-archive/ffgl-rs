@@ -513,6 +513,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f46ad14479a25103f283c0f10005961cf086d8dc42205bb44c46ac563475dca6"
 
 [[package]]
+name = "cloud-flash"
+version = "0.1.0"
+dependencies = [
+ "ffgl-core",
+ "gl",
+ "gl_loader",
+]
+
+[[package]]
 name = "color_quant"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2073,6 +2082,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulse-beam-3"
+version = "0.1.0"
+dependencies = [
+ "ffgl-core",
+ "gl",
+ "gl_loader",
+]
+
+[[package]]
 name = "qoi"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2569,6 +2587,15 @@ checksum = "317936bbbd05227752583946b9e66d7ce3b489f84e11a94a510b4437fef407d7"
 dependencies = [
  "core-foundation-sys",
  "libc",
+]
+
+[[package]]
+name = "segmenter"
+version = "0.1.0"
+dependencies = [
+ "ffgl-core",
+ "gl",
+ "gl_loader",
 ]
 
 [[package]]

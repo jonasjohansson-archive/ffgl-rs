@@ -1,0 +1,13 @@
+[package]
+name = "cloud-flash"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cloud_flash"
+crate-type = ["cdylib"]
+
+[dependencies]
+ffgl-core = { path = "../ffgl-core" }
+gl = "0.14.0"
+gl_loader = "0.1.0"
